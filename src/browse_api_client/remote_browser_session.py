@@ -183,6 +183,7 @@ class RemoteBrowserSession:
         self.viewport_width = viewport_width
         self.viewport_height = viewport_height
         self.ws_url: Optional[str] = None
+        self._connect_headers: Optional[dict] = None
 
         self._http_session: Optional[aiohttp.ClientSession] = None
         self._playwright_cm: Any = None
@@ -225,6 +226,11 @@ class RemoteBrowserSession:
             self.guid,
             self.ws_url,
         )
+        try:
+            self._connect_headers = await self._mint_connect_headers()
+        except Exception:
+            logger.exception("browse_api_client.remote_browser_session.enter.connect_token_failed")
+            raise
 
         self._playwright_cm = async_playwright()
         logger.warning("browse_api_client.remote_browser_session.enter.playwright_start")
@@ -240,8 +246,9 @@ class RemoteBrowserSession:
             self.connect_timeout,
         )
         try:
+            connect_options = {"headers": self._connect_headers} if self._connect_headers else {}
             self.browser = await asyncio.wait_for(
-                self._playwright.chromium.connect_over_cdp(self.ws_url),
+                self._playwright.chromium.connect_over_cdp(self.ws_url, **connect_options),
                 timeout=self.connect_timeout,
             )
         except Exception:
@@ -262,6 +269,21 @@ class RemoteBrowserSession:
                 logger.warning("browse_api_client.remote_browser_session.enter.bound_existing_page page_count=%s", len(pages))
         logger.warning("browse_api_client.remote_browser_session.enter.done guid=%s", self.guid)
         return self
+
+    async def _mint_connect_headers(self) -> Optional[dict]:
+        """Single-use CDP handshake bearer from the Browser API mux; None when the mux is off (409)."""
+        assert self._http_session is not None
+        async with self._http_session.post(
+            f"{self.base_url}/api/remote-browser/{self.guid}/connect-token"
+        ) as response:
+            if response.status == 409:
+                return None
+            response.raise_for_status()
+            data = await response.json()
+        token = str(data.get("token") or "").strip()
+        if not token:
+            raise RuntimeError("Browser API returned an invalid connect token response.")
+        return {"Authorization": f"Bearer {token}"}
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
         await self.close()
